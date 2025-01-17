@@ -11,7 +11,6 @@ load_dotenv()
 
 # Получаем API-токен и настройки из окружения
 API_TOKEN = os.getenv('CRYPTOBOT_API_KEY')
-PUBLIC_URL = os.getenv('PUBLIC_URL')  # Публичный URL
 
 # Проверка наличия API токена
 if not API_TOKEN:
@@ -32,7 +31,7 @@ async def create_payment(amount: float, description: str, user_id: int):
 
     if payment['ok']:
         payment_url = payment['result']['pay_url']
-        invoice_id = str(payment['result']['invoice_id'])  # Преобразуем в строку
+        invoice_id = str(payment['result']['invoice_id'])
 
         # Сохраняем информацию о платеже в базе данных
         async with async_session() as db_session:
@@ -40,7 +39,7 @@ async def create_payment(amount: float, description: str, user_id: int):
                 user_id=user_id,
                 amount=amount,
                 payment_url=payment_url,
-                transaction_id=invoice_id,  # Сохраняем как строку
+                transaction_id=invoice_id,
             )
             db_session.add(new_payment)
             await db_session.commit()
