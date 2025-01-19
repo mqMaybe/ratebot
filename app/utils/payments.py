@@ -1,7 +1,4 @@
 import os
-from app.database.models import async_session
-from sqlalchemy import func
-import app.database.requests as rq
 from dotenv import load_dotenv
 from yoomoney import Quickpay
 from yoomoney import Client
