@@ -108,7 +108,7 @@ async def is_token_valid(user_id):
         return False  # Если пользователь не найден или токен отсутствует
 
 # Функция для сохранения платежа
-async def save_payment(user_id, amount, payment_url, transaction_id):
+async def save_payment(user_id, amount, transaction_id, payment_url):
     async with async_session() as session:
         # Проверяем, существует ли платеж с таким transaction_id
         existing_payment = await session.execute(
@@ -134,14 +134,6 @@ async def get_transaction_id_by_user_id(db, user_id: int):
         payment = result.scalars().first()  # Получаем transaction_id напрямую
         return payment if payment else None  # Возвращаем transaction_id или None, если не найдено
 
-# Функция для получения последнего платежа пользователя
-async def get_last_payment(user_id: int):
-    async with async_session() as session:
-        result = await session.execute(
-            select(Payments).filter(Payments.user_id == user_id).order_by(Payments.created_at.desc())  # Получаем последний платеж
-        )
-        return result.scalars().first()  # Возвращаем последний найденный платеж
-
 # Функция для получения ссылки на оплату
 async def get_payment_url(user_id: int):
     async with async_session() as session:
@@ -153,10 +145,7 @@ async def get_payment_url(user_id: int):
     
 # Функция для получения последнего платежа пользователя с учетом сессии
 async def get_last_payment(session, user_id: int):
-    """Получить последний платеж пользователя."""
     result = await session.execute(
-        select(Payments)
-        .filter(Payments.user_id == user_id)
-        .order_by(Payments.id.desc())  # Используем id для сортировки по автоинкременту
+        select(Payments).filter(Payments.user_id == user_id).order_by(Payments.id.desc())  # Используем id для сортировки по автоинкременту
     )
     return result.scalars().first()  # Возвращаем последний найденный платеж
