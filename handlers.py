@@ -1,9 +1,7 @@
-import os
 from asyncio import sleep
 from aiogram import F, Router
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart, Command
-import aiomysql
 
 import app.keyboards.keyboard as kb
 from app.utils.link import generate_unique_link

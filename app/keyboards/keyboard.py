@@ -1,5 +1,4 @@
-from aiogram.types import (ReplyKeyboardMarkup, KeyboardButton,
-                           InlineKeyboardMarkup, InlineKeyboardButton)
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # Главная клавиатура
 def generate_main_menu():

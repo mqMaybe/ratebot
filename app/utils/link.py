@@ -1,6 +1,5 @@
 import random
 import string
-import aiomysql
 from datetime import datetime
 from app.database.requests import get_db_connection
 
