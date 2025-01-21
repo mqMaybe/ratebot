@@ -3,17 +3,15 @@ import asyncio
 from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 
-from handlers import router
-from app.database.models import async_main
+from handlers import router  # Импортируем роутер с обработчиками
 
 # Основная асинхронная функция для запуска бота
 async def main():
-    # Подключаемся к базе данных и загружаем настройки
-    await async_main()
+    # Загружаем переменные окружения
     load_dotenv()
 
     # Инициализация бота и диспетчера
-    bot = Bot(token=os.getenv('TOKEN'))
+    bot = Bot(token=os.getenv('TOKEN'))  # Токен бота из переменных окружения
     dp = Dispatcher()
 
     # Регистрируем обработчики
@@ -27,4 +25,4 @@ if __name__ == '__main__':
         # Запуск бота
         asyncio.run(main())
     except KeyboardInterrupt:
-        print('EXIT')
+        print('Бот завершил работу.')

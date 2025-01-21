@@ -3,15 +3,11 @@ from asyncio import sleep
 from aiogram import F, Router
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart, Command
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
-from sqlalchemy.future import select
+import aiomysql
 
 import app.keyboards.keyboard as kb
 from app.utils.link import generate_unique_link
 import app.database.requests as rq
-from app.database.models import User
-from app.database.models import async_session
 from app.utils.payments import create_payment, check_payment_status
 
 router = Router()
@@ -31,7 +27,7 @@ async def start_command(message: Message):
             if user:
                 # Показываем клавиатуру для оценки без проверки отзыва
                 await message.answer(
-                    f"Вы можете оставить отзыв для пользователя: {user.first_name}. Оцените его от 1 до 5.",
+                    f"Вы можете оставить отзыв для пользователя: {user[1]}. Оцените его от 1 до 5.", #first_name
                     reply_markup=kb.generate_rate_keyboard(token)
                 )
             else:
@@ -56,12 +52,12 @@ async def show_menu(callback: CallbackQuery):
 @router.callback_query(F.data == "generate_link")
 async def generate_link(callback: CallbackQuery):
     user_id = callback.from_user.id
-    async with async_session() as session:
-        link = await generate_unique_link(user_id, session)  # Генерируем ссылку и токен
-        await callback.answer('')
-        await callback.message.edit_text(
-            f"Ваша персональная ссылка:\n{link}\nОтправьте её друзьям для сбора отзывов!",
-        reply_markup=kb.generate_main_menu())
+    link = await generate_unique_link(user_id)  # Генерируем ссылку и токен
+    await callback.answer('')
+    await callback.message.edit_text(
+        f"Ваша персональная ссылка:\n{link}\nОтправьте её друзьям для сбора отзывов!",
+        reply_markup=kb.generate_main_menu()
+    )
 
 # Обработчик оставления оценки
 @router.callback_query(F.data.startswith('rate_'))
@@ -81,27 +77,27 @@ async def handle_rating(callback: CallbackQuery):
         return
 
     # Проверяем: пользователь не может оценить сам себя
-    if rated_user.tg_id == user_id:
+    if rated_user[2] == user_id:
         await callback.message.edit_text("Вы не можете оценить сами себя!",
                                          reply_markup=kb.generate_main_menu())
         return
 
     # Проверяем: пользователь уже оценивал этого человека
-    async with async_session() as session:
-        existing_rating = await rq.get_existing_rating(user_id, rated_user.tg_id, session)
-        if existing_rating:
-            await callback.message.edit_text("Вы уже оценили этого пользователя!",
-                                             reply_markup=kb.generate_main_menu())
-            return
+    existing_rating = await rq.get_existing_rating(user_id, rated_user[2]) #tg_id
+    if existing_rating:
+        await callback.message.edit_text("Вы уже оценили этого пользователя!",
+                                         reply_markup=kb.generate_main_menu())
+        return
 
-        # Сохраняем рейтинг
-        await rq.save_rating(rater_user_id=user_id, rated_user_id=rated_user.tg_id, score=score)
+    # Сохраняем рейтинг
+    await rq.save_rating(rater_user_id=user_id, rated_user_id=rated_user[2], score=score) #tg_id
 
     # Отправляем сообщение о том, что оценка принята
     await callback.answer('')
     await callback.message.edit_text(
-        f"Спасибо за вашу оценку! Вы оценили пользователя {rated_user.first_name} на {score} баллов.",
-        reply_markup=kb.generate_main_menu())
+        f"Спасибо за вашу оценку! Вы оценили пользователя {rated_user[1]} на {score} баллов.", #first_name
+        reply_markup=kb.generate_main_menu()
+    )
 
 # Обработчик для отображения результатов
 @router.callback_query(F.data == "show_results")
@@ -109,40 +105,39 @@ async def show_results(callback: CallbackQuery):
     user_id = callback.from_user.id
     amount = 2.0
 
-    async with async_session() as session:
-        # Получаем последний платеж
-        last_payment = await rq.get_last_payment(session, user_id)
+    # Получаем последний платеж
+    last_payment = await rq.get_last_payment(user_id)
 
-        if last_payment:
-            if await check_payment_status(last_payment.transaction_id):
-                await callback.answer('')
-                await callback.message.edit_text(
-                    "Ваша статистика:",
-                    reply_markup=kb.stats
-                )
-                return
-            else:
-                # Если последний платеж не оплачен, предлагаем оплатить его
-                await callback.answer('')
-                await callback.message.edit_text(
-                    "Для доступа к статистике необходимо оплатить. Перейдите по ссылке для оплаты:",
-                    reply_markup=kb.generate_payment_keyboard(last_payment.payment_url, 'Проверить оплату')
-                )
-                return
+    if last_payment:
+        if await check_payment_status(last_payment[3]): # transaction_id
+            await callback.answer('')
+            await callback.message.edit_text(
+                "Ваша статистика:",
+                reply_markup=kb.stats
+            )
+            return
+        else:
+            # Если последний платеж не оплачен, предлагаем оплатить его
+            await callback.answer('')
+            await callback.message.edit_text(
+                "Для доступа к статистике необходимо оплатить. Перейдите по ссылке для оплаты:",
+                reply_markup=kb.generate_payment_keyboard(last_payment[4], 'Проверить оплату') # payment_url
+            )
+            return
 
-        # Если платежа нет, создаем новый
-        payment_data = await create_payment(amount, "Оплата за доступ к статистике", user_id)
-        params = payment_data.split('&')
-        label = ''
-        for param in params:
-            if param.startswith('label='):
-                label = param.split('=')[1]
-        await rq.save_payment(user_id, amount, label, payment_data)
-        await callback.answer('')
-        await callback.message.edit_text(
-            "Для доступа к статистике необходимо оплатить. Перейдите по ссылке для оплаты:",
-            reply_markup=kb.generate_payment_keyboard(payment_data, 'Проверить оплату')
-        )
+    # Если платежа нет, создаем новый
+    payment_data = await create_payment(amount, "Оплата за доступ к статистике", user_id)
+    params = payment_data.split('&')
+    label = ''
+    for param in params:
+        if param.startswith('label='):
+            label = param.split('=')[1]
+    await rq.save_payment(user_id, amount, label, payment_data)
+    await callback.answer('')
+    await callback.message.edit_text(
+        "Для доступа к статистике необходимо оплатить. Перейдите по ссылке для оплаты:",
+        reply_markup=kb.generate_payment_keyboard(payment_data, 'Проверить оплату')
+    )
 
 # Переменная отсчета
 is_countdown_active = False  # Переменная отсчета
@@ -159,40 +154,39 @@ async def check_payment(callback: CallbackQuery):
         return
 
     # Проверяем данные о платеже пользователя
-    async with async_session() as session:
-        payment_data = await rq.get_transaction_id_by_user_id(session, user_id)
-        
-        if payment_data:
-            # Если данные о платеже есть, проверяем статус
-            if await check_payment_status(payment_data):
-                # Если оплата прошла успешно
-                await callback.message.edit_text("Оплата прошла успешно. Вы можете просматривать статистику.", reply_markup=kb.stats)
-                return
-            else:
-                # Если оплата не прошла, начинаем отсчет
-                countdown_time = 10
-                for i in range(countdown_time, 0, -1):
-                    # Обновляем кнопку с отсчетом
-                    await callback.message.edit_reply_markup(
-                        reply_markup=kb.generate_payment_keyboard(payment_url, f"Проверить через {i}...")  # Обновляем текст
-                    )
-                    is_countdown_active = True
-                    await sleep(1)
-                
-                is_countdown_active = False
-                # После отсчета проверяем статус
-                if await check_payment_status(payment_data):
-                    await callback.message.edit_text("Оплата прошла успешно. Вы можете просматривать статистику.", reply_markup=kb.stats)
-                else:
-                    await callback.message.edit_text("Оплата не прошла. Перейдите по следующей ссылке для оплаты:", reply_markup=kb.generate_payment_keyboard(payment_url, 'Проверить оплату'))
+    payment_data = await rq.get_transaction_id_by_user_id(user_id)
+    
+    if payment_data:
+        # Если данные о платеже есть, проверяем статус
+        if await check_payment_status(payment_data):
+            # Если оплата прошла успешно
+            await callback.message.edit_text("Оплата прошла успешно. Вы можете просматривать статистику.", reply_markup=kb.stats)
+            return
         else:
-            # Если данных о платеже нет, создаем новый платеж
-            payment_data = await create_payment(amount, "Оплата за доступ к статистике", user_id)
-            await rq.save_payment(user_id, amount, payment_data['payment_url'], payment_data['invoice_id'])
-            await callback.message.edit_text(
-                "Для доступа к статистике необходимо оплатить. Перейдите по ссылке для оплаты:",
-                reply_markup=kb.generate_payment_keyboard(payment_data['payment_url'], 'Проверить оплату')
-            )
+            # Если оплата не прошла, начинаем отсчет
+            countdown_time = 10
+            for i in range(countdown_time, 0, -1):
+                # Обновляем кнопку с отсчетом
+                await callback.message.edit_reply_markup(
+                    reply_markup=kb.generate_payment_keyboard(payment_url, f"Проверить через {i}...")  # Обновляем текст
+                )
+                is_countdown_active = True
+                await sleep(1)
+            
+            is_countdown_active = False
+            # После отсчета проверяем статус
+            if await check_payment_status(payment_data):
+                await callback.message.edit_text("Оплата прошла успешно. Вы можете просматривать статистику.", reply_markup=kb.stats)
+            else:
+                await callback.message.edit_text("Оплата не прошла. Перейдите по следующей ссылке для оплаты:", reply_markup=kb.generate_payment_keyboard(payment_url, 'Проверить оплату'))
+    else:
+        # Если данных о платеже нет, создаем новый платеж
+        payment_data = await create_payment(amount, "Оплата за доступ к статистике", user_id)
+        await rq.save_payment(user_id, amount, payment_data['payment_url'], payment_data['invoice_id'])
+        await callback.message.edit_text(
+            "Для доступа к статистике необходимо оплатить. Перейдите по ссылке для оплаты:",
+            reply_markup=kb.generate_payment_keyboard(payment_data['payment_url'], 'Проверить оплату')
+        )
 
 # Обработчик кнопки "Назад к выбору статистики"
 @router.callback_query(F.data == "back_to_stat_choice")
