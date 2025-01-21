@@ -12,7 +12,7 @@ db_config = {
     'user': os.getenv('DB_USER'),  # Имя пользователя MySQL
     'password': os.getenv('DB_PASSWORD'),  # Пароль пользователя MySQL
     'db': os.getenv('DB_NAME'),  # Имя базы данных
-    'port': int(os.getenv('MYSQL_PORT', 3306))  # Порт MySQL (по умолчанию 3306)
+    'port': 3306  # Порт MySQL
 }
 
 # Функция для подключения к базе данных
