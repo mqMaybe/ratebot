@@ -14,6 +14,16 @@ from app.utils.payments import create_payment, check_payment_status
 class SetPriceState(StatesGroup):
     waiting_for_price = State()
 
+class QuestionLinkState(StatesGroup):
+    selecting_questions = State()
+
+class AddQuestions(StatesGroup):
+    add_questions = State()
+
+class AnsweringQuestions(StatesGroup):
+    answering = State()
+
+
 router = Router()
 
 # Словарь для перевода периодов
@@ -25,37 +35,169 @@ PERIOD_TRANSLATION = {
     "vip": "месяц (VIP)"
 }
 
+@router.callback_query(F.data == "generate_custom_link")
+async def start_question_selection(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(QuestionLinkState.selecting_questions)
+    await state.update_data(selected_questions=[])
+    questions = await rq.get_all_questions()
+    await callback.message.edit_text("Выберите вопросы для оценки:",
+                                     reply_markup=kb.generate_question_selection_keyboard(questions))
+
+@router.callback_query(F.data.startswith("select_q_"))
+async def select_question(callback: CallbackQuery, state: FSMContext):
+    question_id = int(callback.data.split("_")[2])
+    data = await state.get_data()
+    selected = set(data.get("selected_questions", []))
+    selected.add(question_id)
+    await state.update_data(selected_questions=list(selected))
+    await callback.answer("Вопрос добавлен")
+
+@router.callback_query(F.data == "finalize_question_link")
+async def finalize_link(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    question_ids = data.get("selected_questions", [])
+    if not question_ids:
+        await callback.answer("Выберите хотя бы один вопрос", show_alert=True)
+        return
+
+    token = await rq.create_question_link(callback.from_user.id, question_ids)
+    await callback.message.edit_text(f"Ссылка готова:\n{token}",
+                                     reply_markup=kb.generate_back_button())
+    await state.clear()
+
+@router.callback_query(F.data.startswith("rateq_"))
+async def handle_question_rating(callback: CallbackQuery):
+    _, qid, score, token = callback.data.split("_", 3)
+    qid, score = int(qid), int(score)
+    await rq.save_question_rating(token, qid, callback.from_user.id, score)
+    await callback.answer("Оценка записана")
+
+@router.callback_query(F.data.startswith("rate_step_"))
+async def handle_step_rating(callback: CallbackQuery, state: FSMContext):
+    try:
+        # Распаковка callback_data
+        payload = callback.data[len("rate_step_"):]  # удалить префикс
+        qid_str, score_str, token = payload.split("_", 2)
+        qid, score = int(qid_str), int(score_str)
+
+        # Сохраняем оценку
+        await rq.save_question_rating(token, qid, callback.from_user.id, score)
+
+        # Проверяем наличие данных в FSM
+        data = await state.get_data()
+        if "questions" not in data or "index" not in data:
+            await callback.message.edit_text("⛔ Ошибка: сессия устарела или неверна. Попробуйте начать заново.", reply_markup=kb.generate_back_button())
+            await state.clear()
+            return
+
+        questions = data["questions"]
+        index = data["index"] + 1
+
+        if index < len(questions):
+            next_q = questions[index]
+            await state.update_data(index=index)
+            await callback.message.edit_text(
+                f"❓ {next_q['text']}",
+                reply_markup=kb.generate_single_question_keyboard(token, next_q['id'])
+            )
+        else:
+            await state.clear()
+            await callback.message.edit_text("✅ Спасибо, вы ответили на все вопросы!", reply_markup=kb.generate_back_button())
+
+    except Exception as e:
+        await callback.message.edit_text("⚠️ Произошла ошибка при обработке. Попробуйте позже.", reply_markup=kb.generate_back_button())
+        raise e
+
+@router.callback_query(F.data == "poll_results")
+async def show_poll_results(callback: CallbackQuery):
+    user_id = callback.from_user.id
+
+    is_vip = await rq.check_vip_status(user_id)
+    results = await rq.get_poll_results(user_id, detailed=is_vip)
+
+    if not results:
+        await callback.message.edit_text("⛔️ За ваши вопросы пока никто не голосовал.", reply_markup=kb.generate_back_results())
+        return
+
+    if is_vip:
+        # Подробные ответы (теперь с средними оценками)
+        text = "📊 Результаты опросов (VIP):\n\n"
+        for rater in results:
+            text += f"@{rater['username'] or 'аноним'}:\n"
+            for q in rater['questions']:
+                text += f"• {q['text']} — {q['avg_score']:.1f}\n"
+            text += "–––\n"
+    else:
+        # Только средние оценки
+        text = "📊 Средние оценки по вопросам:\n\n"
+        for row in results:
+            text += f"{row['text']}: {row['avg']:.2f}\n"
+
+    await callback.message.edit_text(text, reply_markup=kb.generate_back_results())
+
 # Обработчик команды /start
 @router.message(CommandStart())
-async def start_command(message: Message):
-    # Проверяем/создаем пользователя
+async def start_command(message: Message, state: FSMContext):
+    # Сохраняем пользователя в БД
     await rq.set_user(message.from_user.id, message.from_user.first_name, message.from_user.username)
 
     # Проверяем, является ли пользователь администратором
     is_admin = await rq.is_admin(message.from_user.id)
 
-    # Извлекаем аргументы из команды /start
+    # Обработка /start с аргументом
     if message.text and " " in message.text:
-        args = message.text.split(" ", 1)[1]  # Извлекаем всё, что после /start
-        if args.startswith("rate_"):  # Если аргумент начинается с "rate_"
+        args = message.text.split(" ", 1)[1]
+
+        if args.startswith("rate_"):
             token = args.split("rate_")[1]
+
+            # 1. Попытка найти пользователя (обычная ссылка)
             user = await rq.get_user_by_token(token)
             if user:
-                # Показываем клавиатуру для оценки без проверки отзыва
                 await message.answer(
-                    f"Вы можете оставить отзыв для пользователя: {user['first_name']}. Оцените его от 1 до 5.", #first_name
+                    f"Вы можете оставить отзыв для пользователя: {user['first_name']}.\nОцените его от 1 до 5.",
                     reply_markup=kb.generate_rate_keyboard(token)
                 )
-            else:
-                await message.answer("Ссылка недействительна или пользователь не найден.")
+                return
+
+            # 2. Попытка найти вопросы (опрос по вопросам)
+            questions = await rq.get_questions_by_token(token)
+            # Получаем автора токена
+            author_id = await rq.get_token_owner(token)
+            if author_id == message.from_user.id:
+                await message.answer("⛔️ Вы не можете отвечать на собственные вопросы.", reply_markup=kb.generate_back_button())
+                return
+
+            # Проверка: уже проходил?
+            already_rated = await rq.has_rated_token(token, message.from_user.id)
+            if already_rated:
+                await message.answer("✅ Вы уже прошли этот опрос.", reply_markup=kb.generate_back_button())
+                return
+            
+            if questions:
+                await state.set_state(AnsweringQuestions.answering)
+                await state.update_data(token=token, questions=questions, index=0)
+                
+                current_question = questions[0]
+                await message.answer(
+                    f"❓ {current_question['text']}",
+                    reply_markup=kb.generate_single_question_keyboard(token, current_question['id'])
+                )
+                return
+
+            # Если ни пользователь, ни вопросы не найдены
+            await message.answer("Ссылка недействительна или пользователь/вопросы не найдены.", reply_markup=kb.generate_back_button())
+            return
+
         else:
-            await message.answer("Неверная команда. Пожалуйста, используйте правильный формат.")
-    else:
-        # Если аргументы нет, то просто показываем стартовое меню
-        await message.answer(
-            "Привет! Я помогу собрать оценки о вас. Нажмите на кнопку ниже, чтобы начать.",
-            reply_markup=kb.generate_main_menu(is_admin)
-        )
+            await message.answer("Неверная команда. Пожалуйста, используйте правильный формат.", reply_markup=kb.generate_back_button())
+            return
+
+    # Если аргумента нет — показать главное меню
+    await message.answer(
+        "Привет! Я помогу собрать оценки о вас. Нажмите на кнопку ниже, чтобы начать.",
+        reply_markup=kb.generate_main_menu(is_admin)
+    )
 
 # Обработчик кнопки "Назад в меню"
 @router.callback_query(F.data == 'back_to_menu')
@@ -83,6 +225,7 @@ async def handle_rating(callback: CallbackQuery):
     data_parts = callback.data.split('_')
     score = int(data_parts[1])  # Оценка пользователя (должна быть в 2-й части)
     token = callback.data.split('=')[1]  # Извлекаем токен после символа '='
+    is_admin = await rq.is_admin(callback.from_user.id)
 
     user_id = callback.from_user.id
 
@@ -90,20 +233,20 @@ async def handle_rating(callback: CallbackQuery):
     rated_user = await rq.get_user_by_token(token)
     if not rated_user:
         await callback.message.answer("Ссылка недействительна или пользователь не найден.",
-                                      reply_markup=kb.generate_main_menu())
+                                      reply_markup=kb.generate_main_menu(is_admin))
         return
 
     # Проверяем: пользователь не может оценить сам себя
     if rated_user['tg_id'] == user_id:
         await callback.message.edit_text("Вы не можете оценить сами себя!",
-                                         reply_markup=kb.generate_main_menu())
+                                         reply_markup=kb.generate_main_menu(is_admin))
         return
 
     # Проверяем: пользователь уже оценивал этого человека
     existing_rating = await rq.get_existing_rating(user_id, rated_user['tg_id']) #tg_id
     if existing_rating:
         await callback.message.edit_text("Вы уже оценили этого пользователя!",
-                                         reply_markup=kb.generate_main_menu())
+                                         reply_markup=kb.generate_main_menu(is_admin))
         return
 
     # Сохраняем рейтинг
@@ -113,7 +256,7 @@ async def handle_rating(callback: CallbackQuery):
     await callback.answer('')
     await callback.message.edit_text(
         f"Спасибо за вашу оценку! Вы оценили пользователя {rated_user['first_name']} на {score} баллов.", #first_name
-        reply_markup=kb.generate_main_menu()
+        reply_markup=kb.generate_main_menu(is_admin)
     )
 
 @router.callback_query(F.data == "check_subscription")
@@ -380,7 +523,7 @@ async def back_to_stat_choice(callback: CallbackQuery):
 @router.callback_query(F.data.startswith('stat_'))
 async def handle_statistics(callback: CallbackQuery):
     user_id = callback.from_user.id
-    period = callback.data.split('_')[1]  # Извлекаем период из callback_data
+    period = callback.data.split('_')[1]
 
     # Переводим период на русский язык
     period_name = PERIOD_TRANSLATION.get(period, "неизвестный период")
@@ -541,3 +684,44 @@ async def handle_price_input(message: Message, state: FSMContext):
 
     # Сбрасываем состояние
     await state.clear()
+
+@router.callback_query(F.data.startswith("add_questions"))
+async def add_questions(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+
+    if not await rq.is_admin(user_id):
+        await callback.answer("У вас нет прав администратора.", reply_markup=kb.generate_back_button())
+        return
+    
+    await callback.answer('')
+    await state.set_state(AddQuestions.add_questions)  # устанавливаем состояние
+    await callback.message.edit_text("Введите новый вопрос:", reply_markup=kb.generate_back_button())
+
+@router.message(AddQuestions.add_questions)
+async def handle_question_input(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    if not await rq.is_admin(user_id):
+        await message.answer("У вас нет прав администратора.", reply_markup=kb.generate_back_button())
+        await state.clear()
+        return
+    
+    question = message.text.strip()
+    if not question:
+        await message.answer("Вопрос не может быть пустым.", reply_markup=kb.generate_back_button())
+        return
+
+    try:
+        if await rq.question_exists(question):
+            await message.answer("Такой вопрос уже существует!", reply_markup=kb.generate_back_button())
+            return
+
+        success = await rq.update_questions_list(question)
+        if success:
+            await message.answer(f"✅ Вопрос добавлен: {question}", reply_markup=kb.generate_back_button())
+        else:
+            await message.answer("❌ Ошибка при добавлении вопроса.", reply_markup=kb.generate_back_button())
+    except Exception as e:
+        await message.answer(f"⚠️ Критическая ошибка: {e}", reply_markup=kb.generate_back_button())
+    finally:
+        await state.clear()

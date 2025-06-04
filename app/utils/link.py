@@ -34,7 +34,7 @@ async def generate_unique_link(user_id):
                 (token, datetime.now(), user_id)
             )
             await connection.commit()
-            return f"https://t.me/PeopleRatingsBot?start=rate_{token}"
+            return f"https://t.me/RatePPBot?start=rate_{token}"
         else:
             raise ValueError("Пользователь не найден")
     except Exception as e:

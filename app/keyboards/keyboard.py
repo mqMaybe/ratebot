@@ -12,13 +12,38 @@ def generate_main_menu(is_admin=False):
     """Генерирует главное меню."""
     buttons = [
         [InlineKeyboardButton(text="Сгенерировать ссылку", callback_data="generate_link")],
+        [InlineKeyboardButton(text="Ссылка с вопросами", callback_data="generate_custom_link")],  # Новая кнопка
         [InlineKeyboardButton(text="Просмотреть результаты", callback_data="show_results")],
         [InlineKeyboardButton(text="Проверить подписку", callback_data="check_subscription")],
     ]
     if is_admin:
         buttons.append([InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")])
         buttons.append([InlineKeyboardButton(text="💰 Управление ценами", callback_data="manage_prices")])
+        buttons.append([InlineKeyboardButton(text="➕ Добавить вопросы", callback_data="add_questions")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def generate_question_selection_keyboard(questions):
+    buttons = [[InlineKeyboardButton(text=q['text'], callback_data=f"select_q_{q['id']}")] for q in questions]
+    buttons.append([InlineKeyboardButton(text="✅ Готово", callback_data="finalize_question_link")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def generate_rate_keyboard_for_questions(token, questions):
+    keyboard = []
+    for q in questions:
+        row = [InlineKeyboardButton(text=f"{i}", callback_data=f"rateq_{q['id']}_{i}_{token}") for i in range(1, 6)]
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton(text="Меню", callback_data="back_to_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def generate_single_question_keyboard(token, question_id):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=str(i), callback_data=f"rate_step_{question_id}_{i}_{token}") for i in range(1, 6)]
+        ]
+    )
+
 
 # Клавиатура для статистики
 def generate_stats_menu(is_vip=False):
@@ -26,6 +51,7 @@ def generate_stats_menu(is_vip=False):
             [InlineKeyboardButton(text='Статистика за этот день', callback_data='stat_day')],
             [InlineKeyboardButton(text='Статистика за неделю', callback_data='stat_week')],
             [InlineKeyboardButton(text='Статистика за месяц', callback_data='stat_month')],
+            [InlineKeyboardButton(text='Результаты по вопросам', callback_data='poll_results')],
         ]
         if is_vip:
             buttons.append([InlineKeyboardButton(text="Просмотреть голосовавших", callback_data="view_voters")])

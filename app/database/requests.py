@@ -2,6 +2,8 @@ import aiomysql
 from datetime import timedelta, datetime
 import os
 from dotenv import load_dotenv
+import random
+import string
 
 # Загружаем переменные окружения из файла .env
 load_dotenv()
@@ -23,6 +25,156 @@ async def get_db_connection():
         return connection
     except Exception as e:
         raise
+
+def generate_token(length=16):
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+
+async def get_all_questions():
+    async with await get_db_connection() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("SELECT * FROM questions")
+            return await cur.fetchall()
+
+async def create_question_link(user_id, question_ids):
+    token = generate_token()
+    async with await get_db_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("INSERT INTO question_links (user_id, token) VALUES (%s, %s)", (user_id, token))
+            link_id = cur.lastrowid
+            for qid in question_ids:
+                await cur.execute("INSERT INTO question_link_items (link_id, question_id) VALUES (%s, %s)", (link_id, qid))
+            await conn.commit()
+    return f"https://t.me/RatePPBot?start=rate_{token}"
+
+async def get_questions_by_token(token):
+    async with await get_db_connection() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("""
+                SELECT q.id, q.text FROM questions q
+                JOIN question_link_items qi ON qi.question_id = q.id
+                JOIN question_links l ON qi.link_id = l.id
+                WHERE l.token = %s
+            """, (token,))
+            return await cur.fetchall()
+
+async def save_question_rating(token, question_id, rater_id, score):
+    async with await get_db_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("""
+                INSERT INTO question_ratings (token, question_id, rater_id, score)
+                VALUES (%s, %s, %s, %s)
+            """, (token, question_id, rater_id, score))
+            await conn.commit()
+
+async def update_questions_list(question):
+    try:
+        async with await get_db_connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO questions (text) VALUES (%s)",
+                    (question)
+                )
+                await conn.commit()
+                return True
+    except Exception as e:
+        print(f"Ошибка при добавлении вопроса: {e}")
+        return False
+
+async def question_exists(question_text: str) -> bool:
+    """Проверяет, существует ли вопрос в таблице questions."""
+    async with await get_db_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT EXISTS(
+                    SELECT 1 FROM questions 
+                    WHERE LOWER(text) = LOWER(%s)
+                    LIMIT 1
+                )
+                """,
+                (question_text,)
+            )
+            result = await cur.fetchone()
+            return bool(result[0])
+        
+async def get_token_owner(token):
+    async with await get_db_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT user_id FROM question_links WHERE token = %s", (token,))
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+async def has_rated_token(token, user_id):
+    async with await get_db_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("""
+                SELECT COUNT(*) FROM question_ratings 
+                WHERE token = %s AND rater_id = %s
+            """, (token, user_id))
+            row = await cur.fetchone()
+            return row[0] > 0
+        
+async def get_poll_results(user_id, detailed=False):
+    if not detailed:
+        # Возвращает: [{"text": "Вопрос", "avg": 4.2}]
+        async with await get_db_connection() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""
+                    SELECT q.text, AVG(r.score) as avg
+                    FROM question_ratings r
+                    JOIN question_links l ON r.token = l.token
+                    JOIN question_link_items qi ON qi.link_id = l.id
+                    JOIN questions q ON r.question_id = q.id
+                    WHERE l.user_id = %s
+                    GROUP BY q.id
+                """, (user_id,))
+                return await cur.fetchall()
+
+    else:
+        # Возвращает: [{"username": ..., "questions": [{"text": ..., "avg_score": ...}, ...]}]
+        async with await get_db_connection() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                # Получаем список всех уникальных вопросов пользователя с средними оценками
+                await cur.execute("""
+                    SELECT q.id, q.text, AVG(r.score) as avg_score
+                    FROM question_ratings r
+                    JOIN question_links l ON r.token = l.token
+                    JOIN question_link_items qi ON qi.link_id = l.id
+                    JOIN questions q ON r.question_id = q.id
+                    WHERE l.user_id = %s
+                    GROUP BY q.id
+                    ORDER BY q.id
+                """, (user_id,))
+                questions = await cur.fetchall()
+                
+                # Получаем всех оценивающих пользователей
+                await cur.execute("""
+                    SELECT DISTINCT r.rater_id, u.username
+                    FROM question_ratings r
+                    JOIN question_links l ON r.token = l.token
+                    LEFT JOIN users u ON u.tg_id = r.rater_id
+                    WHERE l.user_id = %s
+                """, (user_id,))
+                raters = await cur.fetchall()
+
+        # Создаем результат
+        result = []
+        for rater in raters:
+            rater_data = {
+                "username": rater["username"],
+                "questions": []
+            }
+            
+            # Для каждого вопроса добавляем среднюю оценку
+            for question in questions:
+                rater_data["questions"].append({
+                    "text": question["text"],
+                    "avg_score": question["avg_score"]
+                })
+            
+            result.append(rater_data)
+
+        return result
 
 # Функция для создания или получения пользователя
 async def set_user(user_id, first_name, username=None):
