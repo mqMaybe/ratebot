@@ -31,7 +31,6 @@ PERIOD_TRANSLATION = {
     "day": "день",
     "week": "неделю",
     "month": "месяц",
-    "vip_month": "месяц (VIP)",
     "vip": "месяц (VIP)"
 }
 
@@ -389,8 +388,10 @@ async def create_new_payment(user_id, period, callback, is_vip=False):
         access_end = now + timedelta(days=1)
     elif period == "week":
         access_end = now + timedelta(weeks=1)
-    elif period == "month" or period == "vip_month":  # Обрабатываем vip_month
-        access_end = now + timedelta(days=30)
+    elif period == "month":
+        access_end = now + timedelta(weeks=4)
+    elif period == "vip":
+        access_end = now + timedelta(weeks=4)
     else:
         # Если период неизвестен, устанавливаем доступ на 1 день по умолчанию
         access_end = now + timedelta(days=1)
@@ -429,12 +430,12 @@ async def buy_vip(callback: CallbackQuery):
         await callback.answer('')
         await callback.message.edit_text(
             f"У вас уже есть активный платеж. Хотите создать новый для VIP-подписки?",
-            reply_markup=kb.generate_confirm_new_payment_keyboard(period="vip_month")
+            reply_markup=kb.generate_confirm_new_payment_keyboard(period="vip")
         )
         return
 
     # Если активного платежа нет, создаем новый VIP-платеж
-    await create_new_payment(user_id, "vip_month", callback, is_vip=True)
+    await create_new_payment(user_id, "vip", callback, is_vip=True)
 
 @router.callback_query(F.data == "check_payment")
 async def check_payment(callback: CallbackQuery):
